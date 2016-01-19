@@ -72,6 +72,7 @@ struct pingpong_context {
 	int			 rx_depth;
 	int			 pending;
 	struct ibv_port_attr     portinfo;
+	int         rx_refill_thrshld;
 };
 
 struct pingpong_dest {
@@ -357,6 +358,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned 
 	ctx->size       = size;
 	ctx->send_flags = IBV_SEND_SIGNALED;
 	ctx->rx_depth   = rx_depth;
+	ctx->rx_refill_thrshld = 3 * rx_depth / 4;
 
 	ctx->buf = memalign(page_size, size);
 	if (!ctx->buf) {
@@ -748,10 +750,13 @@ int main(int argc, char *argv[])
 	if (!ctx)
 		return 1;
 
-	routs = pp_post_recv(ctx, ctx->rx_depth);
-	if (routs < ctx->rx_depth) {
-		fprintf(stderr, "Couldn't post receive (%d)\n", routs);
-		return 1;
+	if (!servername) {
+	    int init_routs = ctx->rx_depth > iters ? iters : ctx->rx_depth;
+	    routs = pp_post_recv(ctx, init_routs);
+	    if (routs < init_routs) {
+	        fprintf(stderr, "Couldn't post receive (%d)\n", routs);
+	        return 1;
+	    }
 	}
 
 	if (use_event)
@@ -883,17 +888,20 @@ int main(int argc, char *argv[])
 				    break;
 
 				case PINGPONG_RECV_WRID:
-					if (--routs <= 1) {
-						routs += pp_post_recv(ctx, ctx->rx_depth - routs);
-						if (routs < ctx->rx_depth) {
-							fprintf(stderr,
-								"Couldn't post receive (%d)\n",
-								routs);
-							return 1;
-						}
-					}
-
-					++cnt;
+				    --routs;
+				    ++cnt;
+				    if (routs <= ctx->rx_refill_thrshld) {
+				        unsigned int i = routs + cnt;
+				        if (i < iters) {
+				            int new_routs = ctx->rx_depth - routs > iters - i ? iters - i : ctx->rx_depth - routs;
+				            int act_new_routs = pp_post_recv(ctx, new_routs);
+				            if (act_new_routs < new_routs) {
+				                fprintf(stderr, "Couldn't post receive (%d)\n", act_new_routs);
+				                return 1;
+				            }
+				            routs += act_new_routs;
+				        }
+				    }
 					break;
 
 				default:
