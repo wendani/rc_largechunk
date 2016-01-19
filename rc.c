@@ -49,6 +49,8 @@
 
 #include "pingpong.h"
 
+#define MSG_SIZE_1G     1073741824U
+
 enum {
 	PINGPONG_RECV_WRID = 1,
 	PINGPONG_SEND_WRID = 2,
@@ -65,7 +67,7 @@ struct pingpong_context {
 	struct ibv_cq		*cq;
 	struct ibv_qp		*qp;
 	void			*buf;
-	int			 size;
+	unsigned int    size;
 	int			 send_flags;
 	int			 rx_depth;
 	int			 pending;
@@ -85,7 +87,7 @@ static inline void pp_sdump_data(void *buf, int size)
     printf("%.*s\n", size, (char *)buf);
 }
 
-static void pp_pop_data(void *buf, unsigned long long size, int mtu)
+static void pp_pop_data(void *buf, unsigned int size, int mtu)
 {
     int val = 65;
 
@@ -341,7 +343,7 @@ out:
 	return rem_dest;
 }
 
-static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
+static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned int size,
 					    int rx_depth, int port,
 					    int use_event)
 {
@@ -363,7 +365,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 	}
 
 	/* FIXME memset(ctx->buf, 0, size); */
-	memset(ctx->buf, 0x7b, size);
+	memset(ctx->buf, 0, size);
 
 	ctx->context = ibv_open_device(ib_dev);
 	if (!ctx->context) {
@@ -584,7 +586,7 @@ static void usage(const char *argv0)
 	printf("  -d, --ib-dev=<dev>     use IB device <dev> (default first device found)\n");
 	printf("  -i, --ib-port=<port>   use port <port> of IB device (default 1)\n");
 	printf("  -s, --size=<size>      size of message to exchange (default 4096)\n");
-	printf("  -m, --mtu=<size>       path MTU (default 1024)\n");
+//	printf("  -m, --mtu=<size>       path MTU (default 1024)\n");
 	printf("  -r, --rx-depth=<dep>   number of receives to post at a time (default 500)\n");
 	printf("  -n, --iters=<iters>    number of exchanges (default 1000)\n");
 	printf("  -l, --sl=<sl>          service level value\n");
@@ -605,8 +607,8 @@ int main(int argc, char *argv[])
 	char                    *servername = NULL;
 	unsigned int             port = 18515;
 	int                      ib_port = 1;
-	unsigned int             size = 4096;
-	enum ibv_mtu		 mtu = IBV_MTU_1024;
+	unsigned int            size = 4096;
+	enum ibv_mtu            mtu;
 	unsigned int             rx_depth = 500;
 	unsigned int             iters = 1000;
 	int                      use_event = 0;
@@ -627,7 +629,7 @@ int main(int argc, char *argv[])
 			{ .name = "ib-dev",   .has_arg = 1, .val = 'd' },
 			{ .name = "ib-port",  .has_arg = 1, .val = 'i' },
 			{ .name = "size",     .has_arg = 1, .val = 's' },
-			{ .name = "mtu",      .has_arg = 1, .val = 'm' },
+//			{ .name = "mtu",      .has_arg = 1, .val = 'm' },
 			{ .name = "rx-depth", .has_arg = 1, .val = 'r' },
 			{ .name = "iters",    .has_arg = 1, .val = 'n' },
 			{ .name = "sl",       .has_arg = 1, .val = 'l' },
@@ -666,16 +668,18 @@ int main(int argc, char *argv[])
 
 		case 's':
 			size = strtoul(optarg, NULL, 0);
+			if (size > MSG_SIZE_1G)
+			    printf("WARNING: message size (%u) > 1GB (%u), may NOT be supported by hardware\n", size, MSG_SIZE_1G);
 			break;
 
-		case 'm':
-			mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
-			if (mtu < 0) {
-				usage(argv[0]);
-				return 1;
-			}
-			break;
-
+//		case 'm':
+//			mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
+//			if (mtu < 0) {
+//				usage(argv[0]);
+//				return 1;
+//			}
+//			break;
+//
 		case 'r':
 			rx_depth = strtoul(optarg, NULL, 0);
 			break;
@@ -760,6 +764,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Couldn't get port info\n");
 		return 1;
 	}
+	mtu = ctx->portinfo.active_mtu;
+	printf("Use mtu size %d\n", 1 << (mtu + 7));
 
 	my_dest.lid = ctx->portinfo.lid;
 	if (ctx->portinfo.link_layer != IBV_LINK_LAYER_ETHERNET &&
@@ -796,12 +802,20 @@ int main(int argc, char *argv[])
 	printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
 	       rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
-	if (servername)
+	if (servername) {
 		if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest,
 					gidx))
 			return 1;
 
-	ctx->pending = PINGPONG_RECV_WRID;
+		ctx->pending = PINGPONG_RECV_WRID;
+		// populate data payload
+		pp_pop_data(ctx->buf, size, 1 << (mtu + 7));
+	}
+
+	if (gettimeofday(&start, NULL)) {
+		perror("gettimeofday");
+		return 1;
+	}
 
 	if (servername) {
 		if (pp_post_send(ctx)) {
@@ -809,11 +823,6 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 		ctx->pending |= PINGPONG_SEND_WRID;
-	}
-
-	if (gettimeofday(&start, NULL)) {
-		perror("gettimeofday");
-		return 1;
 	}
 
 	rcnt = scnt = 0;
