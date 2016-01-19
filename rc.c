@@ -618,6 +618,7 @@ int main(int argc, char *argv[])
 	int                      sl = 0;
 	int			 gidx = -1;
 	char			 gid[33];
+	unsigned int            cnt;
 
 	srand48(getpid() * time(NULL));
 
@@ -807,7 +808,7 @@ int main(int argc, char *argv[])
 					gidx))
 			return 1;
 
-		ctx->pending = PINGPONG_RECV_WRID;
+//		ctx->pending = PINGPONG_RECV_WRID;
 		// populate data payload
 		pp_pop_data(ctx->buf, size, 1 << (mtu + 7));
 	}
@@ -822,11 +823,11 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Couldn't post send\n");
 			return 1;
 		}
-		ctx->pending |= PINGPONG_SEND_WRID;
+//		ctx->pending |= PINGPONG_SEND_WRID;
 	}
 
-	rcnt = scnt = 0;
-	while (rcnt < iters || scnt < iters) {
+	cnt = 0;
+	while (cnt < iters) {
 		if (use_event) {
 			struct ibv_cq *ev_cq;
 			void          *ev_ctx;
@@ -872,8 +873,14 @@ int main(int argc, char *argv[])
 
 				switch ((int) wc[i].wr_id) {
 				case PINGPONG_SEND_WRID:
-					++scnt;
-					break;
+				    ++cnt;
+				    if (cnt < iters) {
+				        if (pp_post_send(ctx)) {
+				            fprintf(stderr, "Couldn't post send\n");
+				            return 1;
+				        }
+				    }
+				    break;
 
 				case PINGPONG_RECV_WRID:
 					if (--routs <= 1) {
@@ -886,23 +893,13 @@ int main(int argc, char *argv[])
 						}
 					}
 
-					++rcnt;
+					++cnt;
 					break;
 
 				default:
 					fprintf(stderr, "Completion for unknown wr_id %d\n",
 						(int) wc[i].wr_id);
 					return 1;
-				}
-
-				ctx->pending &= ~(int) wc[i].wr_id;
-				if (scnt < iters && !ctx->pending) {
-					if (pp_post_send(ctx)) {
-						fprintf(stderr, "Couldn't post send\n");
-						return 1;
-					}
-					ctx->pending = PINGPONG_RECV_WRID |
-						       PINGPONG_SEND_WRID;
 				}
 			}
 		}
@@ -916,7 +913,7 @@ int main(int argc, char *argv[])
 	{
 		float usec = (end.tv_sec - start.tv_sec) * 1000000 +
 			(end.tv_usec - start.tv_usec);
-		long long bytes = (long long) size * iters * 2;
+		unsigned long long bytes = (unsigned long long) size * iters;
 
 		printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n",
 		       bytes, usec / 1000000., bytes * 8. / usec);
