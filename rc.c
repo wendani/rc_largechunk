@@ -73,6 +73,8 @@ struct pingpong_context {
 	int			 pending;
 	struct ibv_port_attr     portinfo;
 	int         rx_refill_thrshld;
+	int         tx_depth;
+	int         tx_refill_thrshld;
 };
 
 struct pingpong_dest {
@@ -346,7 +348,7 @@ out:
 
 static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned int size,
 					    int rx_depth, int port,
-					    int use_event)
+					    int use_event, int tx_depth)
 {
 	struct pingpong_context *ctx;
 	int access_flags = IBV_ACCESS_LOCAL_WRITE;
@@ -359,6 +361,8 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned 
 	ctx->send_flags = IBV_SEND_SIGNALED;
 	ctx->rx_depth   = rx_depth;
 	ctx->rx_refill_thrshld = 3 * rx_depth / 4;
+	ctx->tx_depth   = tx_depth;
+	ctx->tx_refill_thrshld = tx_depth >> 2;
 
 	ctx->buf = memalign(page_size, size);
 	if (!ctx->buf) {
@@ -428,7 +432,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned 
 			.send_cq = ctx->cq,
 			.recv_cq = ctx->cq,
 			.cap     = {
-				.max_send_wr  = 1,
+				.max_send_wr  = tx_depth,
 				.max_recv_wr  = rx_depth,
 				.max_send_sge = 1,
 				.max_recv_sge = 1
@@ -588,13 +592,13 @@ static void usage(const char *argv0)
 	printf("  -d, --ib-dev=<dev>     use IB device <dev> (default first device found)\n");
 	printf("  -i, --ib-port=<port>   use port <port> of IB device (default 1)\n");
 	printf("  -s, --size=<size>      size of message to exchange (default 4096)\n");
-//	printf("  -m, --mtu=<size>       path MTU (default 1024)\n");
 	printf("  -r, --rx-depth=<dep>   number of receives to post at a time (default 500)\n");
 	printf("  -n, --iters=<iters>    number of exchanges (default 1000)\n");
 	printf("  -l, --sl=<sl>          service level value\n");
 	printf("  -e, --events           sleep on CQ events (default poll)\n");
 	printf("  -g, --gid-idx=<gid index> local port gid index\n");
 	printf("  -o, --odp		    use on demand paging\n");
+	printf("  -t, --tx-depth=<dep>   number of sends to post at a time (default 50)\n");
 }
 
 int main(int argc, char *argv[])
@@ -621,6 +625,8 @@ int main(int argc, char *argv[])
 	int			 gidx = -1;
 	char			 gid[33];
 	unsigned int            cnt;
+	unsigned int            tx_depth = 50;
+	int                     touts;
 
 	srand48(getpid() * time(NULL));
 
@@ -632,17 +638,17 @@ int main(int argc, char *argv[])
 			{ .name = "ib-dev",   .has_arg = 1, .val = 'd' },
 			{ .name = "ib-port",  .has_arg = 1, .val = 'i' },
 			{ .name = "size",     .has_arg = 1, .val = 's' },
-//			{ .name = "mtu",      .has_arg = 1, .val = 'm' },
 			{ .name = "rx-depth", .has_arg = 1, .val = 'r' },
 			{ .name = "iters",    .has_arg = 1, .val = 'n' },
 			{ .name = "sl",       .has_arg = 1, .val = 'l' },
 			{ .name = "events",   .has_arg = 0, .val = 'e' },
 			{ .name = "gid-idx",  .has_arg = 1, .val = 'g' },
 			{ .name = "odp",      .has_arg = 0, .val = 'o' },
+			{ .name = "tx-depth", .has_arg = 1, .val = 't' },
 			{ 0 }
 		};
 
-		c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:o",
+		c = getopt_long(argc, argv, "p:d:i:s:r:n:l:eg:ot:",
 							long_options, NULL);
 
 		if (c == -1)
@@ -675,14 +681,6 @@ int main(int argc, char *argv[])
 			    printf("WARNING: message size (%u) > 1GB (%u), may NOT be supported by hardware\n", size, MSG_SIZE_1G);
 			break;
 
-//		case 'm':
-//			mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
-//			if (mtu < 0) {
-//				usage(argv[0]);
-//				return 1;
-//			}
-//			break;
-//
 		case 'r':
 			rx_depth = strtoul(optarg, NULL, 0);
 			break;
@@ -706,6 +704,11 @@ int main(int argc, char *argv[])
 		case 'o':
 			use_odp = 1;
 			break;
+
+		case 't':
+		    tx_depth = strtoul(optarg, NULL, 0);
+		    printf("tx_depth = %u\n", tx_depth);
+		    break;
 
 		default:
 			usage(argv[0]);
@@ -746,7 +749,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	ctx = pp_init_ctx(ib_dev, size, rx_depth, ib_port, use_event);
+	ctx = pp_init_ctx(ib_dev, size, rx_depth, ib_port, use_event, tx_depth);
 	if (!ctx)
 		return 1;
 
@@ -813,7 +816,6 @@ int main(int argc, char *argv[])
 					gidx))
 			return 1;
 
-//		ctx->pending = PINGPONG_RECV_WRID;
 		// populate data payload
 		pp_pop_data(ctx->buf, size, 1 << (mtu + 7));
 	}
@@ -824,11 +826,13 @@ int main(int argc, char *argv[])
 	}
 
 	if (servername) {
-		if (pp_post_send(ctx)) {
-			fprintf(stderr, "Couldn't post send\n");
-			return 1;
-		}
-//		ctx->pending |= PINGPONG_SEND_WRID;
+	    int i;
+	    touts = ctx->tx_depth > iters ? iters : ctx->tx_depth;
+	    for (i = 0; i < touts; ++i)
+	        if (pp_post_send(ctx)) {
+	            fprintf(stderr, "Couldn't post send\n");
+	            return 1;
+	        }
 	}
 
 	cnt = 0;
@@ -878,11 +882,21 @@ int main(int argc, char *argv[])
 
 				switch ((int) wc[i].wr_id) {
 				case PINGPONG_SEND_WRID:
+				    --touts;
 				    ++cnt;
-				    if (cnt < iters) {
-				        if (pp_post_send(ctx)) {
-				            fprintf(stderr, "Couldn't post send\n");
-				            return 1;
+//				    printf("cnt: %u\n", cnt);
+				    if (touts <= ctx->tx_refill_thrshld) {
+				        unsigned int i = touts + cnt;
+				        if (i < iters) {
+				            int j;
+				            int new_touts = ctx->tx_depth - touts > iters - i ? iters - i : ctx->tx_depth - touts;
+				            printf("cnt: %d, refill: %d\n", cnt, new_touts);
+				            for (j = 0; j < new_touts; ++j)
+				                if (pp_post_send(ctx)) {
+				                    fprintf(stderr, "Couldn't post send\n");
+				                    return 1;
+				                }
+				            touts += new_touts;
 				        }
 				    }
 				    break;
@@ -890,10 +904,12 @@ int main(int argc, char *argv[])
 				case PINGPONG_RECV_WRID:
 				    --routs;
 				    ++cnt;
+//				    printf("cnt: %u\n", cnt);
 				    if (routs <= ctx->rx_refill_thrshld) {
 				        unsigned int i = routs + cnt;
 				        if (i < iters) {
 				            int new_routs = ctx->rx_depth - routs > iters - i ? iters - i : ctx->rx_depth - routs;
+				            printf("cnt: %d, refill: %d\n", cnt, new_routs);
 				            int act_new_routs = pp_post_recv(ctx, new_routs);
 				            if (act_new_routs < new_routs) {
 				                fprintf(stderr, "Couldn't post receive (%d)\n", act_new_routs);
