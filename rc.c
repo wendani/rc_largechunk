@@ -396,21 +396,21 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned 
 	}
 
 	if (use_odp) {
-		const uint32_t rc_caps_mask = IBV_ODP_SUPPORT_SEND |
-					      IBV_ODP_SUPPORT_RECV;
-		struct ibv_device_attr_ex attrx;
+		const uint32_t rc_caps_mask = IBV_EXP_ODP_SUPPORT_SEND |
+					      IBV_EXP_ODP_SUPPORT_RECV;
+		struct ibv_exp_device_attr attrx;
 
-		if (ibv_query_device_ex(ctx->context, NULL, &attrx)) {
+		if (ibv_exp_query_device(ctx->context, &attrx)) {
 			fprintf(stderr, "Couldn't query device for its features\n");
 			goto clean_comp_channel;
 		}
 
-		if (!(attrx.odp_caps.general_caps & IBV_ODP_SUPPORT) ||
+		if (!(attrx.odp_caps.general_odp_caps & IBV_EXP_ODP_SUPPORT) ||
 		    (attrx.odp_caps.per_transport_caps.rc_odp_caps & rc_caps_mask) != rc_caps_mask) {
 			fprintf(stderr, "The device isn't ODP capable or does not support RC send and receive with ODP\n");
 			goto clean_comp_channel;
 		}
-		access_flags |= IBV_ACCESS_ON_DEMAND;
+		access_flags |= IBV_EXP_ACCESS_ON_DEMAND;
 	}
 	ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size, access_flags);
 
@@ -419,7 +419,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, unsigned 
 		goto clean_pd;
 	}
 
-	ctx->cq = ibv_create_cq(ctx->context, rx_depth + 1, NULL,
+	ctx->cq = ibv_create_cq(ctx->context, rx_depth + tx_depth, NULL,
 				ctx->channel, 0);
 	if (!ctx->cq) {
 		fprintf(stderr, "Couldn't create CQ\n");
@@ -588,17 +588,17 @@ static void usage(const char *argv0)
 	printf("  %s <host>     connect to server at <host>\n", argv0);
 	printf("\n");
 	printf("Options:\n");
-	printf("  -p, --port=<port>      listen on/connect to port <port> (default 18515)\n");
-	printf("  -d, --ib-dev=<dev>     use IB device <dev> (default first device found)\n");
-	printf("  -i, --ib-port=<port>   use port <port> of IB device (default 1)\n");
-	printf("  -s, --size=<size>      size of message to exchange (default 4096)\n");
-	printf("  -r, --rx-depth=<dep>   number of receives to post at a time (default 500)\n");
-	printf("  -n, --iters=<iters>    number of exchanges (default 1000)\n");
-	printf("  -l, --sl=<sl>          service level value\n");
-	printf("  -e, --events           sleep on CQ events (default poll)\n");
+	printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
+	printf("  -d, --ib-dev=<dev>        use IB device <dev> (default first device found)\n");
+	printf("  -i, --ib-port=<port>      use port <port> of IB device (default 1)\n");
+	printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
+	printf("  -r, --rx-depth=<dep>      number of receives to post at a time (default 500)\n");
+	printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
+	printf("  -l, --sl=<sl>             service level value\n");
+	printf("  -e, --events              sleep on CQ events (default poll)\n");
 	printf("  -g, --gid-idx=<gid index> local port gid index\n");
-	printf("  -o, --odp		    use on demand paging\n");
-	printf("  -t, --tx-depth=<dep>   number of sends to post at a time (default 50)\n");
+	printf("  -o, --odp                 use on demand paging\n");
+	printf("  -t, --tx-depth=<dep>      number of sends to post at a time (default 50)\n");
 }
 
 int main(int argc, char *argv[])
